@@ -4,7 +4,7 @@ import { useState, useEffect, useRef } from 'react';
 import { Box, Button, CircularProgress, IconButton, Snackbar, Alert, LinearProgress, Typography } from '@mui/material';
 import LogoutIcon from '@mui/icons-material/Logout';
 import SettingsIcon from '@mui/icons-material/Settings';
-import { api, Profile, Release, HistoryItem, Collection } from '@/lib/api';
+import { Anixart, BookmarkSortType, BookmarkType, IProfile, IRelease, IVoteRelease, ICollection } from 'anixartjs';
 import { calculateHours, calculateDays, getTopReleaseFromHistory, getLastWatched, getDaysSinceRegistration, calculateAveragePerDay, getCurrentYear, filterByCurrentYear } from '@/lib/utils';
 import WelcomeScreen from './screens/WelcomeScreen';
 import TimeScreen from './screens/TimeScreen';
@@ -26,12 +26,12 @@ interface WrappedViewerProps {
 export default function WrappedViewer({ onLogout, onOpenSettings }: WrappedViewerProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [profile, setProfile] = useState<Profile | null>(null);
-  const [topRelease, setTopRelease] = useState<Release | null>(null);
-  const [lastWatched, setLastWatched] = useState<HistoryItem | null>(null);
-  const [collections, setCollections] = useState<Collection[]>([]);
-  const [favorites, setFavorites] = useState<Release[]>([]);
-  const [topRated, setTopRated] = useState<Release[]>([]);
+  const [profile, setProfile] = useState<IProfile | null>(null);
+  const [topRelease, setTopRelease] = useState<IRelease | null>(null);
+  const [lastWatched, setLastWatched] = useState<IRelease | null>(null);
+  const [collections, setCollections] = useState<ICollection[]>([]);
+  const [favorites, setFavorites] = useState<IRelease[]>([]);
+  const [topRated, setTopRated] = useState<IRelease[] | IVoteRelease[]>([]);
   const [yearStats, setYearStats] = useState({
     watchedThisYear: 0,
     completedThisYear: 0,
@@ -91,36 +91,58 @@ export default function WrappedViewer({ onLogout, onOpenSettings }: WrappedViewe
       setLoading(true);
       setError(null);
 
+      const API = new Anixart({
+        token: sessionStorage.getItem('anixart_token') ?? ""
+      });
+
       // Загружаем профиль
-      const profileData = await api.getProfile();
+      const profileData = (await API.endpoints.profile.info(Number(sessionStorage.getItem("anixart_profile_id")) ?? 0)).profile;
       setProfile(profileData);
 
       // Используем историю из профиля или загружаем отдельно
-      let historyItems = profileData.history || [];
-      
-      // Если истории нет в профиле, загружаем отдельно
-      if (historyItems.length === 0) {
-        try {
-          const historyData = await api.getHistory(1);
-          historyItems = historyData.items || [];
-        } catch {
-          // Игнорируем ошибки истории
-        }
+      let historyItems: IRelease[] = [];
+      let historyTotal = (await API.endpoints.release.getHistory(0)).total_count;
+
+      // Проходимся циклом по истории
+      for (let i = 0; i < Math.floor(historyTotal / 25); i++) {
+        let historyData = await API.endpoints.release.getHistory(i);
+
+        // Проверяем все ли элементы относятся не к текущему году
+        if (!historyData.content.every(x => (
+          new Date(x.last_view_timestamp * 1000).getFullYear() != new Date().getFullYear()
+        ))) {
+          // Если да, то заносим в массив
+          historyItems = historyItems.concat(historyData.content || []);
+        } else break;
+      }
+
+      let releaseVotes: IVoteRelease[] = [];
+      let releaseVotesTotal = (await API.endpoints.profile.getVotedReleases(profileData.id, 0)).total_count;
+
+      for (let i = 0; i < Math.floor(releaseVotesTotal / 25); i++) {
+        let releaseVotesData = await API.endpoints.profile.getVotedReleases(profileData.id, i, BookmarkSortType.NewToOldAddTime);
+
+        if (!releaseVotesData.content.every(x => (
+          new Date(x.voted_at * 1000).getFullYear() != new Date().getFullYear()
+        ))) {
+          releaseVotes = releaseVotes.concat(releaseVotesData.content || []);
+        } else break;
       }
 
       if (historyItems.length > 0) {
         const top = getTopReleaseFromHistory(historyItems);
         if (top) {
+          console.log(top);
           try {
             const releaseId = top.release?.id || top.id;
             if (releaseId) {
-              const releaseData = await api.getRelease(releaseId);
+              const releaseData = (await API.endpoints.release.info(releaseId)).release;
               setTopRelease(releaseData);
             } else {
               // Используем данные из истории, если они есть
               const releaseData = top.release || top;
               if (releaseData.title_ru) {
-                setTopRelease(releaseData as Release);
+                setTopRelease(releaseData);
               }
             }
           } catch (err) {
@@ -128,7 +150,7 @@ export default function WrappedViewer({ onLogout, onOpenSettings }: WrappedViewe
             // Используем данные из истории, если они есть
             const releaseData = top.release || top;
             if (releaseData.title_ru) {
-              setTopRelease(releaseData as Release);
+              setTopRelease(releaseData as IRelease);
             }
           }
         }
@@ -142,9 +164,9 @@ export default function WrappedViewer({ onLogout, onOpenSettings }: WrappedViewe
       // Загружаем коллекции
       try {
         if (profileData.id) {
-          const collectionsData = await api.getCollections(profileData.id, 1);
-          if (collectionsData.items && collectionsData.items.length > 0) {
-            setCollections(collectionsData.items);
+          const collectionsData = await API.endpoints.collection.getUserCollections(profileData.id, 0);
+          if (collectionsData.content && collectionsData.content.length > 0) {
+            setCollections(collectionsData.content);
           }
         }
       } catch {
@@ -153,9 +175,14 @@ export default function WrappedViewer({ onLogout, onOpenSettings }: WrappedViewe
 
       // Загружаем избранное
       try {
-        const favoritesData = await api.getFavorites(1);
-        if (favoritesData.items && favoritesData.items.length > 0) {
-          setFavorites(favoritesData.items);
+
+        const favoritesData = await API.endpoints.profile.getFavorites({
+          page: 0,
+          sort: BookmarkSortType.NewToOldAddTime,
+          filter_announce: 0
+        });
+        if (favoritesData.content && favoritesData.content.length > 0) {
+          setFavorites(favoritesData.content);
         }
       } catch {
         // Игнорируем ошибки избранного
@@ -163,25 +190,13 @@ export default function WrappedViewer({ onLogout, onOpenSettings }: WrappedViewe
 
       // Загружаем оценки на 5 звезд
       try {
-        if (profileData.votes && profileData.votes.length > 0) {
-          const fiveStarVotes = profileData.votes.filter((vote: any) => vote.my_vote === 5);
+        if (releaseVotes && releaseVotes.length > 0) {
+          const fiveStarVotes = releaseVotes.filter(vote => vote.my_vote === 5);
           if (fiveStarVotes.length > 0) {
             // Сначала используем данные из votes, если они полные
-            const releasesFromVotes: Release[] = fiveStarVotes
+            const releasesFromVotes: IVoteRelease[] = fiveStarVotes
               .slice(0, 10)
-              .map((vote: any) => ({
-                id: vote.id,
-                title_ru: vote.title_ru || 'Без названия',
-                title_original: vote.title_original,
-                poster: vote.poster,
-                image: vote.image,
-                genres: vote.genres,
-                year: vote.year,
-                description: vote.description,
-                rating: vote.rating,
-                grade: vote.grade,
-              }))
-              .filter((r: Release) => r.title_ru && r.title_ru !== 'Без названия');
+              .filter((r: IVoteRelease) => r.title_ru && r.title_ru !== '');
 
             // Если в votes есть достаточно данных, используем их
             if (releasesFromVotes.length > 0 && releasesFromVotes[0].title_ru) {
@@ -194,13 +209,12 @@ export default function WrappedViewer({ onLogout, onOpenSettings }: WrappedViewe
                   }
                   // Иначе загружаем полную информацию
                   try {
-                    const fullRelease = await api.getRelease(release.id);
+                    const fullRelease = (await API.endpoints.release.info(release.id)).release;
                     return {
                       ...release,
                       ...fullRelease,
                       // Сохраняем данные из votes, если они есть
                       title_ru: release.title_ru || fullRelease.title_ru,
-                      poster: release.poster || fullRelease.poster,
                       image: release.image || fullRelease.image,
                     };
                   } catch {
@@ -210,17 +224,18 @@ export default function WrappedViewer({ onLogout, onOpenSettings }: WrappedViewe
               );
 
               const successfulReleases = releasesWithDetails
-                .filter((r): r is PromiseFulfilledResult<Release> => r.status === 'fulfilled')
-                .map(r => r.value);
+                .filter((r): r is PromiseFulfilledResult<IVoteRelease> => r.status === 'fulfilled')
+                .map(r => r.value)
+                .filter((r) => new Date(r.voted_at * 1000).getFullYear() != new Date().getFullYear());
               
               setTopRated(successfulReleases);
             } else {
               // Если данных в votes недостаточно, загружаем через API
               const releases = await Promise.allSettled(
-                fiveStarVotes.slice(0, 10).map((vote: any) => api.getRelease(vote.id))
+                fiveStarVotes.slice(0, 10).map(async (vote) => (await API.endpoints.release.info(vote.id)).release)
               );
               const successfulReleases = releases
-                .filter((r): r is PromiseFulfilledResult<Release> => r.status === 'fulfilled')
+                .filter((r): r is PromiseFulfilledResult<IRelease> => r.status === 'fulfilled')
                 .map(r => r.value);
               setTopRated(successfulReleases);
             }
@@ -244,7 +259,7 @@ export default function WrappedViewer({ onLogout, onOpenSettings }: WrappedViewe
         });
 
         // Фильтруем votes за год
-        const votesThisYear = profileData.votes?.filter((vote: any) => {
+        const votesThisYear = releaseVotes.filter((vote) => {
           const timestamp = vote.voted_at;
           return timestamp && timestamp >= yearStart && timestamp <= yearEnd;
         }) || [];
@@ -259,36 +274,70 @@ export default function WrappedViewer({ onLogout, onOpenSettings }: WrappedViewe
         try {
           // Загружаем все типы списков
           const [watchingList, planList, completedList, holdOnList, droppedList] = await Promise.allSettled([
-            api.getProfileList(1, 1), // watching
-            api.getProfileList(2, 1), // plan
-            api.getProfileList(3, 1), // completed
-            api.getProfileList(4, 1), // hold_on
-            api.getProfileList(5, 1), // dropped
+            API.endpoints.profile.getBookmarks({
+              type: BookmarkType.Watching,
+              page: 0,
+              sort: BookmarkSortType.NewToOldAddTime,
+              id: profileData.id,
+              filter_announce: 0
+            }),
+
+            API.endpoints.profile.getBookmarks({
+              type: BookmarkType.InPlans,
+              page: 0,
+              sort: BookmarkSortType.NewToOldAddTime,
+              id: profileData.id,
+              filter_announce: 0
+            }),
+
+            API.endpoints.profile.getBookmarks({
+              type: BookmarkType.Completed,
+              page: 0,
+              sort: BookmarkSortType.NewToOldAddTime,
+              id: profileData.id,
+              filter_announce: 0
+            }),
+
+            API.endpoints.profile.getBookmarks({
+              type: BookmarkType.HoldOn,
+              page: 0,
+              sort: BookmarkSortType.NewToOldAddTime,
+              id: profileData.id,
+              filter_announce: 0
+            }),
+
+            API.endpoints.profile.getBookmarks({
+              type: BookmarkType.Dropped,
+              page: 0,
+              sort: BookmarkSortType.NewToOldAddTime,
+              id: profileData.id,
+              filter_announce: 0
+            })
           ]);
 
           // Фильтруем по году (если есть timestamp в данных)
-          if (watchingList.status === 'fulfilled' && watchingList.value.items) {
-            watchingThisYear = watchingList.value.items.length; // Упрощенный подсчет
+          if (watchingList.status === 'fulfilled' && watchingList.value.content) {
+            watchingThisYear = watchingList.value.content.length; // Упрощенный подсчет
           }
-          if (planList.status === 'fulfilled' && planList.value.items) {
-            planThisYear = planList.value.items.length;
+          if (planList.status === 'fulfilled' && planList.value.content) {
+            planThisYear = planList.value.content.length;
           }
-          if (completedList.status === 'fulfilled' && completedList.value.items) {
-            completedThisYear = completedList.value.items.length;
+          if (completedList.status === 'fulfilled' && completedList.value.content) {
+            completedThisYear = completedList.value.content.length;
           }
-          if (holdOnList.status === 'fulfilled' && holdOnList.value.items) {
-            holdOnThisYear = holdOnList.value.items.length;
+          if (holdOnList.status === 'fulfilled' && holdOnList.value.content) {
+            holdOnThisYear = holdOnList.value.content.length;
           }
-          if (droppedList.status === 'fulfilled' && droppedList.value.items) {
-            droppedThisYear = droppedList.value.items.length;
+          if (droppedList.status === 'fulfilled' && droppedList.value.content) {
+            droppedThisYear = droppedList.value.content.length;
           }
         } catch {
           // Используем данные из профиля как fallback
-          watchingThisYear = (profileData as any).watching_count || 0;
-          planThisYear = (profileData as any).plan_count || 0;
+          watchingThisYear = profileData.watching_count || 0;
+          planThisYear = profileData.plan_count || 0;
           completedThisYear = profileData.completed_count || 0;
-          holdOnThisYear = (profileData as any).hold_on_count || 0;
-          droppedThisYear = (profileData as any).dropped_count || 0;
+          holdOnThisYear = profileData.hold_on_count || 0;
+          droppedThisYear = profileData.dropped_count || 0;
         }
 
         // Фильтруем избранное за год (если есть timestamp)

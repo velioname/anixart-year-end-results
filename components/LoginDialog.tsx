@@ -10,7 +10,7 @@ import {
   Alert,
 } from '@mui/material';
 import { useState } from 'react';
-import { api } from '@/lib/api';
+import { Anixart, DefaultResult, LoginResult } from 'anixartjs';
 
 interface LoginDialogProps {
   open: boolean;
@@ -23,6 +23,7 @@ export default function LoginDialog({ open, onClose, onSuccess }: LoginDialogPro
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const API = new Anixart({});
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -30,11 +31,33 @@ export default function LoginDialog({ open, onClose, onSuccess }: LoginDialogPro
     setLoading(true);
 
     try {
-      await api.signIn(login, password);
-      onSuccess();
-      onClose();
-      setLogin('');
-      setPassword('');
+      const loginResult = await API.endpoints.auth.signIn({
+        login,
+        password
+      })
+
+      switch (loginResult.code) {
+        case DefaultResult.Ok:
+          sessionStorage.setItem("anixart_token", loginResult.profileToken.token);
+          sessionStorage.setItem("anixart_profile_id", loginResult.profile.id.toString());
+          onSuccess();
+          onClose();
+          setLogin('');
+          setPassword('');
+          break;
+
+        case LoginResult.InvalidLogin:
+          setError('Неправильный логин');
+          break;
+
+        case LoginResult.InvalidPassword:
+          setError('Неправильный пароль');
+          break;
+
+        default:
+          setError('Ошибка авторизации');
+          break;
+      }   
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Ошибка авторизации');
     } finally {
